@@ -128,13 +128,127 @@
  
         ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/semi_space_to.png)
 
-        __设置25%这个限制值的原因是当这次Scavenge回收完成后，这个To空间将变成From空间，接下来的内存分配将在这个空间中进行。如果占比过高，会影响后续的内存分配。__
+        __设置25%这个限制值的原因是当这次Scavenge回收完成后，这个To空间将变成From空间，接下来的内存分配将在这个空间中进行。如果占比过高，会影响后续的内存分配。对象晋升后，将会在老生代空间中作为存活周期较长的对象来对待，接受新的回收算法处理。__
+
+      * Mark-Sweep & Mark-Compact
+
+        > 对于老生代中的对象，由于存活对象占较大比重，再采用Scavenge的方式会有两个问题：一个是存活对象较多，复制存活对象的效率将会很低；另一个问题依然是浪费一半空间的问题。为此，V8在老生代中主要采用Mark-Sweep和Mark-Compact相结合的方式进行垃圾回收。
+
+        * Mark-Sweep是标记清除的意思，它分为标记和清除两个阶段。与Scavenge相比，Mark-Sweep并不将内存空间划分为两半，所以不存在浪费一半空间的行为。与Scavenge复制活着的对象不同，Mark-Sweep在标记阶段遍历堆中所有对象，并标记活着的对象，在随后的清除阶段中，只清除没有被标记的对象。可以看出，Scavenge中只复制活着的对象，而Mark-Sweep只清理死亡对象。活对象在新生代中只占较小部分，死对象在老生代中只占较小部分，这是两种回收方式能高效处理的原因。
+        * 下图为Mark-Sweep在老生代空间中标记的示意图，黑色部分标记为死亡对象
+        
+          ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/mark_sweep.png)
+
+        * Mark-Sweep最大的问题是在进行一次标记清除回收后，内存空间会出现不连续的状态。这种内存碎片会对后续的内存分配造成问题，因为很可能出现需要分配一个大对象的情况，这时所有的碎片空间都无法完成此次分配，就会提前触发垃圾回收，而这次回收是不必要的。
+        * 为了解决Mark-Sweep的内存碎片问题，Mark-Compact被提出来。Mark-Compact是标记整理的意思，是在Mark-Sweep的基础上演变而来的。它们的差别在于对象在标记为死亡后，在整理的过程中，将活着的对象往一端移动，移动完成后，直接清理掉边界外的内存。图5-7为Mark-Compact完成标记并移动存活对象后的示意图，白色格子为存活对象，深色格子为死亡对象，浅色格子为存活对象移动后留下的空洞。
+
+          ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/mark_compact.png)
+
+        * 完成移动后，就可以直接清除最右边的存活对象后面的内存区域完成回收。
+        * Mark-Sweep、Mark-Compact、Scavenge三种主要垃圾回收算法的简单对比
+        <table>
+            <thead>
+                <th>回收算法</th><th>Mark-Sweep</th><th>Mark-Compact</th><th>Scavenge</th>
+            </thead>
+            <tbody>
+                <tr><td>速度</td><td>中等</td><td>最慢</td><td>最快</td></tr>
+                <tr><td>空间开销</td><td>少（有碎片）</td><td>少（无碎片）</td><td>双倍空间（无碎片）</td></tr>
+                <tr><td>是否移动对象</td><td>否</td><td>是</td><td>是</td></tr>
+            </tbody>
+        </table>
+
+         * 从表格上看，Mark-Sweep和Mark-Compact之间，由于Mark-Compact需要移动对象，所以它的执行速度不可能很快，所以在取舍上，V8主要使用Mark-Sweep，在空间不足以对从新生代中晋升过来的对象进行分配时才使用Mark-Compact。
+
+         * Incremental Marking
+
+           * 为了避免出现js应用逻辑与垃圾回收器看到的不一致的情况，垃圾回收的3种基本算法都需要将应用逻辑暂停下来，待执行完垃圾回收后再恢复执行应用逻辑，这种行为被称为“全停顿”（stop-the-world）。在V8的分代式垃圾回收中，一次小垃圾回收只收集新生代，由于新生代默认配置得较小，且其中存活对象通常较少，所以即便它是全停顿的影响也不大。但V8的老生代通常配置得较大，且存活对象较多，全堆垃圾回收（full垃圾回收）的标记、清理、整理等动作造成的停顿就会比较可怕，需要设法改善。
+           * 为了降低全堆垃圾回收带来的停顿时间，V8先从标记阶段入手，将原本要一口气停顿完成的动作改为增量标记（incremental marking），也就是拆分为许多小“步进”，每做完一“步进”就让js应用逻辑执行一小会，垃圾回收与应用逻辑交替执行直到标记阶段完成。
+
+            ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/incremental_marking.png)
+
+           * V8在经过增量标记的改进后，垃圾回收的最大停顿时间可以减少到原本的1/6左右。
+           * V8后续还引入了延迟清理（lazy sweeping）与增量式整理（incremental compaction），让清理与整理动作也变成增量式的。同时还计划引入并行标记与并行清理，进一步利用多核性能降低每次停顿的时间。
+
+      * 小结
+
+        > 从V8的自动垃圾回收机制的设计角度可以看到，V8对内存使用进行限制的缘由。新生代设计为一个较小的内存空间是合理的，而老生代空间过大对于垃圾回收并无特别意义。V8对内存限制的设置对于Chrome浏览器这种每个选项卡页面使用一个V8实例而言，内存的使用是绰绰有余，对于Node编写的服务器端来说，内存限制也并不影响正常场景下的使用。但是对于V8的垃圾回收特点和js在单线程上的执行情况，垃圾回收是影响性能的因素之一。想要高性能执行效率，需要注意让垃圾回收尽量少地进行，尤其是全堆垃圾回收。
+
+        __以Web服务器中的会话实现为例，一般通过内存来存储，但在访问量大的时候会导致老生代中的存活对象骤增，不仅造成清理/整理过程费时，还会造成内存紧张，甚至溢出__
 
   * 查看垃圾回收日志
+
+    > 查看垃圾回收日志的方式主要是在启动时添加--trace_gc参数。在进行垃圾回收时，将会从标准输出中打印垃圾回收的日志信息。通过分析垃圾回收日志，可以了解垃圾回收的运行状况，找出垃圾回收的哪些阶段比较耗时。
+
+    * 示例：循环创建对象并将其分配给局部变量a，文件名:test01.js
+    
+    ```js
+    for (var i = 0; i < 1000000; i++) {
+        var a = {};
+    }
+    ```
+
+    __$ node --prof test01.js__
+
+    * 这将会在目录下得到一个v8.log日志文件。该日志文件基本不具备可读性，内容大致如下：
+
+      ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/isolate_v8_log.png)
+
+    V8提供了linux-tick-processor工具用于统计日志信息。该工具可以从Node源码的deps/v8/tools目录下找到，Windows下对应命令文件为windows-tick-processor.bat。将该目录添加到环境变量PATH中。
+
 
 ## 高效使用内存
 
   * 作用域
+
+    > 提到如何触发垃圾回收，第一个要介绍的是作用域（scope）。在js中能形成作用域的有函数调用、with以及全局作用域。
+
+    ```js
+    var foo = function() {
+        var local = {};
+    };
+    ```
+
+    > foo()函数在每次被调用时会创建对应的作用域，函数执行结束后，该作用域将会销毁。同时作用域中声明的局部变量分配在该作用域上，随作用域的销毁而销毁。只被局部变量引用的对象存活周期较短。在这个示例中，由于对象非常小，将会分配在新生代中的From空间中。在作用域释放后，局部变量local失效，其引用的对象将会在下次垃圾回收时被释放。
+
+    __以上是最基本的内存回收过程。__
+
+    1. 标识符查找
+
+        与作用域相关的即是标识符查找。所谓标识符，可以理解为变量名。在下面的代码中，执行bar()函数时，将会遇到local变量：
+      
+        ```js
+        var bar = function() {
+          console.log(local);
+        };
+        ```
+        js在执行时会去查找该变量定义在哪里。它最先查找的是当前作用域，如果在当前作用域中无法找到该变量的声明，将会向上级的作用域里查找，直到查到为止。
+
+    2. 作用域链
+
+        在下面的代码中：
+
+        ```js
+        var foo = function() {
+          var local = 'local var';
+          var bar = function() {
+            var local = 'another var';
+            var baz = function() {
+              console.log(local);
+            };
+            baz();
+          };
+          bar();
+        };
+        foo();
+        ``` 
+        local变量在baz()函数形成的作用域里查找不到，继而将在bar()的作用域里寻找。如果去掉上述代码bar()中的local声明，将会继续向上查找，一直到全局作用域。这样的查找方式使得作用域像一个链条。由于标识符的查找方向是向上的，所以变量只能向外访问，而不能向内访问。如下图：
+
+          ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/function_scope.png)
+
+        当我们在baz()函数中访问local变量时，由于作用域中的变量列表中没有local，所以会向上一个作用域中查找，接着会在bar()函数执行得到的变量列表中找到了一个local变量的定义，于是使用它。尽管在上一层的作用域中也存在local的定义，但是不会继续查找了。如果查找一个不存在的变量，将会一直沿着作用域链查找到全局作用域，最后抛出未定义错误。
+
+    3. 
+
   * 闭包
   * 小结
 
