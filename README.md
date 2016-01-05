@@ -247,14 +247,133 @@
 
         当我们在baz()函数中访问local变量时，由于作用域中的变量列表中没有local，所以会向上一个作用域中查找，接着会在bar()函数执行得到的变量列表中找到了一个local变量的定义，于是使用它。尽管在上一层的作用域中也存在local的定义，但是不会继续查找了。如果查找一个不存在的变量，将会一直沿着作用域链查找到全局作用域，最后抛出未定义错误。
 
-    3. 
+    3. 变量的主动释放
+
+      > 如果变量是全局变量（不通过var声明或定义在global变量上），由于全局作用域需要直到进程退出才能释放，此时将导致引用的对象常驻内存（常驻在老生代中）。如果需要释放常驻内存的对象，可以通过delete操作来删除引用关系。或者将变量重新赋值，让旧的对象脱离引用关系。举个示例，老生代内存清除和整理的过程中，会被回收释放
+      
+      ```js
+      global.foo = "I am global object";
+      console.log(global.foo); // => "I am global object"
+      delete global.foo;
+      // 或者重新赋值
+      global.foo = undefined; // or null
+      console.log(global.foo); // => undefined
+      ```
+
+      __同样，如果在非全局作用域中，想主动释放变量引用的对象，也可以通过这样的方式。虽然delete操作和重新赋值具有相同的效果，但是在V8中通过delete删除对象的属性有可能干扰V8的优化，所以通过赋值方式解除引用更好。__
 
   * 闭包
+
+    * 下面代码，local会得到未定义的异常：
+
+      ```js
+      var foo = function() {
+        (function() {
+          var local = "局部变量";
+        }());
+        console.log(local);
+      };
+      ```
+
+      __在js中，实现外部作用域访问内部作用域中变量的方法叫做闭包（closure）。这得益于高阶函数的特性：函数可以作为参数或者返回值。__
+
+      ```js
+      var foo = function() {
+        var bar = function() {
+          var local = "局部变量";
+          return function() {
+            return local;
+          };
+        };
+        var baz = bar();
+        console.log(baz());
+      };
+      ```
+
+      __在bar()函数执行完成后，局部变量local将会随着作用域的销毁而被回收。但是注意这里的特点在于返回值是一个匿名函数，且这个函数中具备了访问local的条件。虽然在后续的执行中，在外部作用域中还是无法直接访问local，但是若要访问它，可以通过中间函数来过渡。__
+
+      __闭包是js的高级特性，利用它可以产生很多巧妙的效果。它的问题在于，一旦有变量引用这个中间函数，这个中间函数将不会释放，同时也会使原始的作用域得不到释放，作用域中产生的内存占用也不会得到释放。除非不再有引用，才会逐步释放。__
+
   * 小结
+
+    __在正常js执行中，无法立即回收的内存有闭包和全局变量引用这两种情况。由于V8的内存限制，要十分小心此类变量是否无限制地增加，因为它会导致老生代中的对象增多。__
 
 ## 内存指标
 
   * 查看内存使用情况
+
+    __前面用到的process.memoryUsage()可以查看内存使用情况。除此之外，os模块中totalmem()和freemem()方法也可以查看内存使用情况。__
+
+    * 查看进程的内存占用
+    
+        调用process.memoryUsage()可以看到Node进程的内存占用情况，示例代码如下：
+
+      ```js
+      `$` node
+      `>` process.memoryUsage()
+      {
+        rss: 18821120,
+        heapTotal: 10295296,
+        heapUsed: 5013664
+      }
+      ```
+
+      __rss是resident set size的缩写，即进程的常驻内存部分。进程的内存总共有几部分，一部分是rss，其余部分在交换区（swap）或者文件系统（filesystem）中。__
+
+      __除了rss外，heapTotal和heapUsed对应的是V8的堆内存信息。heapTotal是堆中总共申请的内存量，heapUsed表示目前堆中使用中的内存量。这3个值的单位都是字节。为了更好地查看效果，我们格式化一下输出结果：__
+
+      ```js
+      var showMem = function() {
+        var mem = process.memoryUsage();
+        var format = function(bytes) {
+          return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+        };
+        console.log('Process: heapTotal ' + format(mem.heapTotal) + ' heapUsed ' + format(mem.heapUsed) + ' rss ' + format(mem.rss));
+        console.log('---------------------------------------------------------------------------');
+      };
+      ```
+
+      同时，写一个方法用于不停地分配内存但不释放内存，相关代码如下：
+
+      ```js
+      var useMem = function() {
+        var size = 20 * 1024 * 1024;
+        var arr = new Array(size);
+        for (var i = 0; i < size; i++) {
+          arr[i] = 0;
+        }
+        return arr;
+      };
+      var total = [];
+      for (var j = 0; j < 15; j++) {
+        showMem();
+        total.push(useMem());
+      }
+      showMem();
+      ```
+
+      将以上代码村委outofmemory.js并执行它，得到的输出结果如下：
+
+      `$` node outofmemory.js
+
+        ![Alt text](https://raw.githubusercontent.com/zqjflash/nodejs-memory/master/outofmemory.png)
+
+      可以看到，每次调用useMem都导致了3个值的增长。在接近1500MB的时候，无法继续分配内存，然后进程内存溢出了，连循环体都无法执行完成，仅执行了9次。
+
+    * 查看系统的内存占用
+
+      > 与process.memoryUsage()不同的是，os模块中的totalmem()和freemem()这两个方法用于查看操作系统的内存使用情况，它们分别返回系统的总内存和闲置内存，以字节为单位。示例代码如下：
+
+      ```js
+      `$` node
+      `>` os.totalmem()
+      `>` 12798062592
+      `>` os.freemem()
+      `>` 2753875968
+      ```
+
+        __从输出信息看，这台电脑总内存为8GB，当前闲置内存大致为4.2GB。__
+
   * 堆外内存
   * 小结
 
